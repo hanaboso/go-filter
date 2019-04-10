@@ -1,0 +1,9 @@
+stages:
+  - test
+
+test:
+  stage: test
+  image: golang:latest
+  script:
+    - go vet ./...
+    - go test -v ./...

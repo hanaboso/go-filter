@@ -1,9 +1,12 @@
 package filter
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,15 +55,19 @@ type Body struct {
 	LastID string  `json:"lastId"`
 }
 
+func (f Body) FitToModel(model interface{}) (err error) {
+	return f.Filter.FitToModel(model)
+}
+
 // ToSql returns sql, args and error build from contained filters
-func (filter Body) ToSql(table string, columns ...string) (string, []interface{}, error) {
+func (f Body) ToSql(table string, columns ...string) (string, []interface{}, error) {
 	return squirrel.
 		Select(columns...).
 		From(table).
-		Where(filter.Filter).
-		OrderBy(filter.Sorter.OrderBy()...).
-		Limit(filter.Paging.Limit()).
-		Offset(filter.Paging.Offset()).
+		Where(f.Filter).
+		OrderBy(f.Sorter.OrderBy()...).
+		Limit(f.Paging.Limit()).
+		Offset(f.Paging.Offset()).
 		ToSql()
 }
 
@@ -255,4 +262,55 @@ func (p Paging) Limit() uint64 {
 // Offset returns OFFSET value for Sql
 func (p Paging) Offset() uint64 {
 	return uint64(p.Page-1) * p.Limit()
+}
+
+// Parse parses request by method and returns Filter.Body
+func Parse(req *http.Request) (Body, error) {
+	if ct := req.Header.Get("Content-Type"); ct != "application/json" {
+		return Body{}, fmt.Errorf("wrong content-type: %s", ct)
+	}
+
+	switch {
+	case req.Method == http.MethodGet:
+		return parseGet(req)
+	case req.Method == http.MethodPost:
+		return parsePost(req)
+	default:
+		return Body{}, fmt.Errorf("unknown method %s", req.Method)
+	}
+}
+
+// TODO validate input
+func parseGet(req *http.Request) (body Body, err error) {
+	q := req.URL.Query()
+
+	page, err := strconv.Atoi(q.Get("page"))
+	if err != nil {
+		return Body{}, err
+	}
+	body.Paging.Page = uint(page)
+
+	itemsPerPage, err := strconv.Atoi(q.Get("itemsPerPage"))
+	if err != nil {
+		return Body{}, err
+	}
+	body.Paging.ItemsPerPage = uint(itemsPerPage)
+
+	if err := json.Unmarshal([]byte(q.Get("filter")), &body.Filter); err != nil {
+		return Body{}, err
+	}
+	for _, sort := range q["sort"] {
+		sp := strings.Split(sort+",", ",")
+		column, direction := sp[0], sp[1]
+
+		body.Sorter = append(body.Sorter,
+			Sorter{{Column: column, Direction: direction}}...)
+	}
+
+	return body, nil
+}
+
+func parsePost(req *http.Request) (body Body, err error) {
+	// defer req.Body.Close() // should i close it here?
+	return body, json.NewDecoder(req.Body).Decode(&body)
 }

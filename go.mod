@@ -1,4 +1,4 @@
-module filter
+module gitlab.hanaboso.net/prochazka.t/grid-filter
 
 go 1.12
 

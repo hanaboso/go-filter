@@ -47,35 +47,75 @@ func RegisterType(i interface{}, f ConvertFunc) {
 	registeredTypes[t] = f
 }
 
-// Body of filter
-type Body struct {
-	Filter Filters `json:"filter"`
-	Paging Paging  `json:"paging"`
-	Sorter Sorter  `json:"sorter"`
-	LastID string  `json:"lastId"`
+// TODO validate input
+// Filter
+type Filter struct {
+	filter filters
+	paging paging
+	search string
+	sorter sorter
+	lastID string
 }
 
-func (f Body) FitToModel(model interface{}) (err error) {
-	return f.Filter.FitToModel(model)
+func (f Filter) MarshalJSON() ([]byte, error) {
+	return json.Marshal(&struct {
+		Filter filters `json:"filter"`
+		Paging paging  `json:"paging"`
+		Search string  `json:"search"`
+		Sorter sorter  `json:"sorter"`
+		LastID string  `json:"lastId"`
+	}{
+		Filter: f.filter,
+		Paging: f.paging,
+		Search: f.search,
+		Sorter: f.sorter,
+		LastID: f.lastID,
+	})
+}
+
+func (f *Filter) UnmarshalJSON(b []byte) error {
+	var body struct {
+		Filter filters `json:"filter"`
+		Paging paging  `json:"paging"`
+		Search string  `json:"search"`
+		Sorter sorter  `json:"sorter"`
+		LastID string  `json:"lastId"`
+	}
+	if err := json.Unmarshal(b, &body); err != nil {
+		return err
+	}
+	*f = Filter{
+		filter: body.Filter,
+		paging: body.Paging,
+		search: body.Search,
+		sorter: body.Sorter,
+		lastID: body.LastID,
+	}
+
+	return nil
+}
+
+func (f Filter) FitToModel(model interface{}) (err error) {
+	return f.filter.FitToModel(model)
 }
 
 // ToSql returns sql, args and error build from contained filters
-func (f Body) ToSql(table string, columns ...string) (string, []interface{}, error) {
+func (f Filter) ToSql(table string, columns ...string) (string, []interface{}, error) {
 	return squirrel.
 		Select(columns...).
 		From(table).
-		Where(f.Filter).
-		OrderBy(f.Sorter.OrderBy()...).
-		Limit(f.Paging.Limit()).
-		Offset(f.Paging.Offset()).
+		Where(f.filter).
+		OrderBy(f.sorter.OrderBy()...).
+		Limit(f.paging.Limit()).
+		Offset(f.paging.Offset()).
 		ToSql()
 }
 
-// Filters is type for all levels of filters
-type Filters [][]Filter
+// filters is type for all levels of filters
+type filters [][]filter
 
 // ToSql builds are nested filters to one Sql query
-func (f Filters) ToSql() (string, []interface{}, error) {
+func (f filters) ToSql() (string, []interface{}, error) {
 	var and squirrel.And
 	for _, f := range f {
 		var or squirrel.Or
@@ -89,7 +129,7 @@ func (f Filters) ToSql() (string, []interface{}, error) {
 
 // FitToModel transforms all filters from JSON formats to DB format
 // if some filter doesn't match with struct's field, than isn't marked as valid
-func (f Filters) FitToModel(model interface{}) (err error) {
+func (f filters) FitToModel(model interface{}) (err error) {
 	t := reflect.TypeOf(model)
 
 	// change model type to non-pointer
@@ -146,16 +186,16 @@ func (f Filters) FitToModel(model interface{}) (err error) {
 	return nil
 }
 
-// Filter is one concrete filter on one column
-type Filter struct {
+// filter is one concrete filter on one column
+type filter struct {
 	Operator string        `json:"operator"`
 	Column   string        `json:"column"`
 	Value    []interface{} `json:"value"`
 	valid    bool
 }
 
-// ToSql creates Sql from filter, but only if filter is marked as valid during Filters.FitToModel
-func (f Filter) ToSql() (string, []interface{}, error) {
+// ToSql creates Sql from filter, but only if filter is marked as valid during filters.FitToModel
+func (f filter) ToSql() (string, []interface{}, error) {
 	if !f.valid {
 		return "", nil, nil
 	}
@@ -234,40 +274,40 @@ func (f Filter) ToSql() (string, []interface{}, error) {
 	return sq.ToSql()
 }
 
-// Sorter holds sorting rules
-type Sorter []struct {
+// sorter holds sorting rules
+type sorter []struct {
 	Column    string `json:"column"`
 	Direction string `json:"direction"`
 }
 
 // OrderBy returns ORDER BY string for Sql
-func (s Sorter) OrderBy() (sl []string) {
+func (s sorter) OrderBy() (sl []string) {
 	for _, so := range s {
 		sl = append(sl, fmt.Sprintf("%s %s", so.Column, so.Direction))
 	}
 	return sl
 }
 
-// Paging holds info for pagination
-type Paging struct {
+// paging holds info for pagination
+type paging struct {
 	Page         uint `json:"page"`
 	ItemsPerPage uint `json:"itemsPerPage"`
 }
 
 // Limit returns LIMIT value for Sql
-func (p Paging) Limit() uint64 {
+func (p paging) Limit() uint64 {
 	return uint64(p.ItemsPerPage)
 }
 
 // Offset returns OFFSET value for Sql
-func (p Paging) Offset() uint64 {
+func (p paging) Offset() uint64 {
 	return uint64(p.Page-1) * p.Limit()
 }
 
-// Parse parses request by method and returns Filter.Body
-func Parse(req *http.Request) (Body, error) {
+// Parse parses request by method and returns filter
+func Parse(req *http.Request) (Filter, error) {
 	if ct := req.Header.Get("Content-Type"); ct != "application/json" {
-		return Body{}, fmt.Errorf("wrong content-type: %s", ct)
+		return Filter{}, fmt.Errorf("wrong content-type: %s", ct)
 	}
 
 	switch {
@@ -276,41 +316,41 @@ func Parse(req *http.Request) (Body, error) {
 	case req.Method == http.MethodPost:
 		return parsePost(req)
 	default:
-		return Body{}, fmt.Errorf("unknown method %s", req.Method)
+		return Filter{}, fmt.Errorf("unknown method %s", req.Method)
 	}
 }
 
-// TODO validate input
-func parseGet(req *http.Request) (body Body, err error) {
+func parseGet(req *http.Request) (body Filter, err error) {
 	q := req.URL.Query()
-
+	// paging
 	page, err := strconv.Atoi(q.Get("page"))
 	if err != nil {
-		return Body{}, err
+		return Filter{}, err
 	}
-	body.Paging.Page = uint(page)
-
 	itemsPerPage, err := strconv.Atoi(q.Get("itemsPerPage"))
 	if err != nil {
-		return Body{}, err
+		return Filter{}, err
 	}
-	body.Paging.ItemsPerPage = uint(itemsPerPage)
-
-	if err := json.Unmarshal([]byte(q.Get("filter")), &body.Filter); err != nil {
-		return Body{}, err
-	}
+	body.paging = paging{Page: uint(page), ItemsPerPage: uint(itemsPerPage)}
+	// search
+	body.search = q.Get("search")
+	// sort
 	for _, sort := range q["sort"] {
 		sp := strings.Split(sort+",", ",")
 		column, direction := sp[0], sp[1]
 
-		body.Sorter = append(body.Sorter,
-			Sorter{{Column: column, Direction: direction}}...)
+		body.sorter = append(body.sorter,
+			sorter{{Column: column, Direction: direction}}...)
+	}
+	// filter
+	if err := json.Unmarshal([]byte(q.Get("filter")), &body.filter); err != nil {
+		return Filter{}, err
 	}
 
 	return body, nil
 }
 
-func parsePost(req *http.Request) (body Body, err error) {
-	// defer req.Body.Close() // should i close it here?
+func parsePost(req *http.Request) (body Filter, err error) {
+	// defer req.Filter.Close() // should i close it here?
 	return body, json.NewDecoder(req.Body).Decode(&body)
 }

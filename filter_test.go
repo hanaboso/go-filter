@@ -1,10 +1,9 @@
-package filter_test
+package filter
 
 import (
 	"bytes"
 	"database/sql/driver"
 	"errors"
-	"filter"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -134,7 +133,7 @@ const jsonStr = `{
   },
   "sorter": [
     {
-      "column": "firstname",
+      "column": "firstName",
       "direction": "ASC"
     },
     {
@@ -145,22 +144,24 @@ const jsonStr = `{
       "column": "id"
     }
   ],
+  "search": "value",
   "filter": ` + filterJSON + `
 }`
 
-const queryStr = `page=1&itemsPerPage=20&sort=firstname,ASC&sort=created,DESC&sort=id&filter=` + filterJSON
+const queryStr = `page=1&itemsPerPage=20&search=value&sort=firstName,ASC&sort=created,DESC&sort=id&filter=` + filterJSON
 
-var expectedFilter = filter.Body{
-	Paging: filter.Paging{
+var expectedFilter = Filter{
+	paging: paging{
 		Page:         1,
 		ItemsPerPage: 20,
 	},
-	Sorter: filter.Sorter{
-		{Column: "firstname", Direction: "ASC"},
+	search: "value",
+	sorter: sorter{
+		{Column: "firstName", Direction: "ASC"},
 		{Column: "created", Direction: "DESC"},
 		{Column: "id"},
 	},
-	Filter: [][]filter.Filter{
+	filter: [][]filter{
 		{
 			{Column: "id", Operator: "EQ", Value: []interface{}{"f1611454-debb-4d9f-bd78-83f0d38b0176"}},
 			{Column: "id", Operator: "NEQ", Value: []interface{}{"853649c7-9ff9-4572-b5b2-98f8da30e20a", "4b27dc87-e969-4bc3-afc5-195403fea580"}},
@@ -206,7 +207,7 @@ type S struct {
 
 func TestMain(m *testing.M) {
 	// Register custom type for transforming API format to DB format
-	filter.RegisterType(UUID{}, func(i interface{}) (i2 interface{}, e error) {
+	RegisterType(UUID{}, func(i interface{}) (i2 interface{}, e error) {
 		s, ok := i.(string)
 		if !ok {
 			return nil, errors.New("expected string for UUID field")
@@ -233,7 +234,7 @@ func Test_ParseGet(t *testing.T) {
 		},
 	}
 
-	filter, err := filter.Parse(req)
+	filter, err := Parse(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +269,7 @@ func Test_ParsePost(t *testing.T) {
 		},
 	}
 
-	filter, err := filter.Parse(req)
+	filter, err := Parse(req)
 	if err != nil {
 		t.Fatal(err)
 	}

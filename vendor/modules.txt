@@ -6,3 +6,5 @@ github.com/google/uuid
 github.com/lann/builder
 # github.com/lann/ps v0.0.0-20150810152359-62de8c46ede0
 github.com/lann/ps
+# golang.org/x/sync v0.0.0-20190227155943-e225da77a7e6
+golang.org/x/sync/errgroup

@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Masterminds/squirrel"
+	"golang.org/x/sync/errgroup"
 )
 
 // ConvertFunc is just typed function that's used for registered types for transforming data
@@ -95,20 +95,26 @@ func (f *Filter) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// FitToModel tries to fit filter to model, if error occurred filter will be in inappropriate state
 func (f Filter) FitToModel(model interface{}) (err error) {
-	return f.filter.FitToModel(model)
+	var g errgroup.Group
+	g.Go(func() error { return f.filter.FitToModel(model) })
+	//g.Go(func() error { return f.search.FitToModel(model) })// TODO check if searchable field and fit name by tags
+	g.Go(func() error { return f.sorter.FitToModel(model) })
+	return g.Wait()
 }
 
 // ToSql returns sql, args and error build from contained filters
 func (f Filter) ToSql(table string, columns ...string) (string, []interface{}, error) {
-	return squirrel.
-		Select(columns...).
-		From(table).
+	return f.ExtendSelect(squirrel.Select(columns...).From(table)).ToSql()
+}
+
+func (f Filter) ExtendSelect(builder squirrel.SelectBuilder) squirrel.SelectBuilder {
+	return builder.
 		Where(f.filter).
 		OrderBy(f.sorter.OrderBy()...).
 		Limit(f.paging.Limit()).
-		Offset(f.paging.Offset()).
-		ToSql()
+		Offset(f.paging.Offset())
 }
 
 // filters is type for all levels of filters
@@ -180,7 +186,6 @@ func (f filters) FitToModel(model interface{}) (err error) {
 				}
 			}
 		}
-
 	}
 
 	return nil
@@ -278,14 +283,63 @@ func (f filter) ToSql() (string, []interface{}, error) {
 type sorter []struct {
 	Column    string `json:"column"`
 	Direction string `json:"direction"`
+	valid     bool
 }
 
 // OrderBy returns ORDER BY string for Sql
-func (s sorter) OrderBy() (sl []string) {
+func (s sorter) OrderBy() []string {
+	sl := make([]string, 0, len(s))
 	for _, so := range s {
-		sl = append(sl, fmt.Sprintf("%s %s", so.Column, so.Direction))
+		if so.valid {
+			sl = append(sl, fmt.Sprintf("%s %s", so.Column, so.Direction))
+		}
 	}
 	return sl
+}
+
+func (s sorter) FitToModel(model interface{}) error {
+	t := reflect.TypeOf(model)
+
+	// change model type to non-pointer
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	// go over all fields
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+
+		// change type to non-pointer
+		fieldType := field.Type
+		if fieldType.Kind() == reflect.Ptr {
+			fieldType = fieldType.Elem()
+		}
+
+		// TODO check if sortable field
+
+		// get db name for this column
+		dbName, ok := field.Tag.Lookup("db")
+		if !ok {
+			dbName = strings.ToLower(field.Name)
+		}
+		// get json name for this column
+		jsonName, ok := field.Tag.Lookup("json")
+		if !ok {
+			jsonName = field.Name
+		}
+
+		// TODO goroutines?
+		// change f type to same as in mapping struct
+		for i := range s {
+			if s[i].Column == jsonName {
+				// column name is db name now
+				s[i].Column = dbName
+				// set as valid
+				s[i].valid = true
+			}
+		}
+	}
+
+	return nil
 }
 
 // paging holds info for pagination
@@ -322,28 +376,8 @@ func Parse(req *http.Request) (Filter, error) {
 
 func parseGet(req *http.Request) (body Filter, err error) {
 	q := req.URL.Query()
-	// paging
-	page, err := strconv.Atoi(q.Get("page"))
-	if err != nil {
-		return Filter{}, err
-	}
-	itemsPerPage, err := strconv.Atoi(q.Get("itemsPerPage"))
-	if err != nil {
-		return Filter{}, err
-	}
-	body.paging = paging{Page: uint(page), ItemsPerPage: uint(itemsPerPage)}
-	// search
-	body.search = q.Get("search")
-	// sort
-	for _, sort := range q["sort"] {
-		sp := strings.Split(sort+",", ",")
-		column, direction := sp[0], sp[1]
-
-		body.sorter = append(body.sorter,
-			sorter{{Column: column, Direction: direction}}...)
-	}
 	// filter
-	if err := json.Unmarshal([]byte(q.Get("filter")), &body.filter); err != nil {
+	if err := json.Unmarshal([]byte(q.Get("filter")), &body); err != nil {
 		return Filter{}, err
 	}
 

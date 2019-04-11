@@ -15,7 +15,26 @@ import (
 	"github.com/google/uuid"
 )
 
-const filterJSON = `[
+const filterJSON = `{
+  "paging": {
+    "page": 1,
+    "itemsPerPage": 20
+  },
+  "sorter": [
+    {
+      "column": "firstName",
+      "direction": "ASC"
+    },
+    {
+      "column": "created",
+      "direction": "DESC"
+    },
+    {
+      "column": "id"
+    }
+  ],
+  "search": "value",
+  "filter": [
 [
   {
 	"column": "id",
@@ -124,33 +143,10 @@ const filterJSON = `[
 	]
   }
 ]
-]`
-
-const jsonStr = `{
-  "paging": {
-    "page": 1,
-    "itemsPerPage": 20
-  },
-  "sorter": [
-    {
-      "column": "firstName",
-      "direction": "ASC"
-    },
-    {
-      "column": "created",
-      "direction": "DESC"
-    },
-    {
-      "column": "id"
-    }
-  ],
-  "search": "value",
-  "filter": ` + filterJSON + `
+]
 }`
 
-const queryStr = `page=1&itemsPerPage=20&search=value&sort=firstName,ASC&sort=created,DESC&sort=id&filter=` + filterJSON
-
-var expectedFilter = Filter{
+var filterParsed = Filter{
 	paging: paging{
 		Page:         1,
 		ItemsPerPage: 20,
@@ -183,6 +179,48 @@ var expectedFilter = Filter{
 		}, {
 			{Column: "createdAt", Operator: "BETWEEN", Value: []interface{}{"2000-10-02T15:00:00Z", "2020-10-02T15:00:00Z"}},
 			{Column: "createdAt", Operator: "NBETWEEN", Value: []interface{}{"2000-10-02T15:00:00Z", "2020-10-02T15:00:00Z"}},
+		},
+	},
+}
+var filterFitted = Filter{
+	paging: paging{
+		Page:         1,
+		ItemsPerPage: 20,
+	},
+	search: "value",
+	sorter: sorter{
+		{Column: "firstName", Direction: "ASC"},
+		{Column: "created", Direction: "DESC"},
+		{Column: "x.id", valid: true},
+	},
+	filter: [][]filter{
+		{
+			{Column: "x.id", Operator: "EQ", Value: []interface{}{UUID{UUID: uuid.MustParse("f1611454-debb-4d9f-bd78-83f0d38b0176")}}, valid: true},
+			{Column: "x.id", Operator: "NEQ", Value: []interface{}{UUID{UUID: uuid.MustParse("853649c7-9ff9-4572-b5b2-98f8da30e20a")}, UUID{UUID: uuid.MustParse("4b27dc87-e969-4bc3-afc5-195403fea580")}}, valid: true},
+		}, {
+			{Column: "x.value", Operator: "GT", Value: []interface{}{10.0}, valid: true},
+			{Column: "x.value", Operator: "LTE", Value: []interface{}{10.0}, valid: true},
+		}, {
+			{Column: "x.value", Operator: "LT", Value: []interface{}{"10"}, valid: true},
+			{Column: "x.value", Operator: "GTE", Value: []interface{}{"10"}, valid: true},
+		}, {
+			{Column: "x.name", Operator: "LIKE", Value: []interface{}{"John Smith"}, valid: true},
+		}, {
+			{Column: "x.name", Operator: "STARTS", Value: []interface{}{"John"}, valid: true},
+			{Column: "x.name", Operator: "ENDS", Value: []interface{}{"Smith"}, valid: true},
+		}, {
+			{Column: "s.activated_at", Value: []interface{}{time.Date(2002, 10, 2, 15, 00, 00, 0, time.UTC)}, valid: true},
+			{Column: "s.activated_at", Operator: "EMPTY", valid: true},
+			{Column: "s.activated_at", Operator: "NEMPTY", valid: true},
+		}, {
+			{Column: "s.created_at", Operator: "BETWEEN", valid: true, Value: []interface{}{
+				time.Date(2000, 10, 2, 15, 00, 00, 0, time.UTC),
+				time.Date(2020, 10, 2, 15, 00, 00, 0, time.UTC),
+			}},
+			{Column: "s.created_at", Operator: "NBETWEEN", valid: true, Value: []interface{}{
+				time.Date(2000, 10, 2, 15, 00, 00, 0, time.UTC),
+				time.Date(2020, 10, 2, 15, 00, 00, 0, time.UTC),
+			}},
 		},
 	},
 }
@@ -223,8 +261,8 @@ func TestMain(m *testing.M) {
 }
 
 func Test_ParseGet(t *testing.T) {
-	u, _ := url.Parse(`http://example.org`)
-	u.RawQuery = queryStr
+	u, _ := url.Parse(`http://httpbin.org/anything`)
+	u.RawQuery = url.Values{"filter": {filterJSON}}.Encode()
 
 	req := &http.Request{
 		Method: http.MethodGet,
@@ -239,31 +277,15 @@ func Test_ParseGet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !reflect.DeepEqual(expectedFilter, filter) {
-		t.Fatalf("expected: %+v, got: %+v", expectedFilter, filter)
+	if !reflect.DeepEqual(filterParsed, filter) {
+		t.Fatalf("expected: %+v, got: %+v", filterParsed, filter)
 	}
-
-	// Fit filter to concrete type
-	// remove unused filters, cast json names to db names and transform all registered types
-	if err := filter.FitToModel(S{}); err != nil {
-		t.Fatal(err)
-	}
-	// get SQL query
-	var table, columns = "accounts", []string{"id", "created_at", "name", "value", "activated_at"}
-	sql, args, err := filter.ToSql(table, columns...)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	fmt.Println(sql)
-	fmt.Println(args)
-
 }
 
 func Test_ParsePost(t *testing.T) {
 	req := &http.Request{
 		Method: http.MethodPost,
-		Body:   ioutil.NopCloser(bytes.NewBufferString(jsonStr)),
+		Body:   ioutil.NopCloser(bytes.NewBufferString(filterJSON)),
 		Header: http.Header{
 			"Content-Type": {"application/json"},
 		},
@@ -274,28 +296,51 @@ func Test_ParsePost(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !reflect.DeepEqual(expectedFilter, filter) {
-		t.Fatalf("expected: %+v, got: %+v", expectedFilter, filter)
+	if !reflect.DeepEqual(filterParsed, filter) {
+		t.Fatalf("expected: %+v, got: %+v", filterParsed, filter)
+	}
+}
+
+func TestFilter_FitToModel(t *testing.T) {
+	req := &http.Request{
+		Method: http.MethodPost,
+		Body:   ioutil.NopCloser(bytes.NewBufferString(filterJSON)),
+		Header: http.Header{
+			"Content-Type": {"application/json"},
+		},
 	}
 
-	// Fit filter to concrete type
-	// remove unused filters, cast json names to db names and transform all registered types
-	if err := filter.FitToModel(S{}); err != nil {
-		t.Fatal(err)
-	}
-	// get SQL query
-	var table, columns = "accounts", []string{"id", "created_at", "name", "value", "activated_at"}
-	sql, args, err := filter.ToSql(table, columns...)
+	filter, err := Parse(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	fmt.Println(sql)
-	fmt.Println(args)
+	var model struct {
+		ID          UUID       `json:"id" db:"x.id"`
+		CreatedAt   time.Time  `json:"createdAt" db:"s.created_at"`
+		Name        string     `json:"name" db:"x.name"`
+		Value       int        `json:"value" db:"x.value"`
+		ActivatedAt *time.Time `json:"activatedAt" db:"s.activated_at"`
+	}
 
-	//db, err := ConnForTest(test)
+	if err := filter.FitToModel(model); err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(filterFitted, filter) {
+		t.Fatalf("expected: %+v, got: %+v", filterFitted, filter)
+	}
+
+	//sq := squirrel.
+	//	Select("x.id", "s.created_at", "x.name", "x.value", "s.activated_at").
+	//	From("eska s").
+	//	Join("ixka x ON x.name = s.name")
+	//
+	//sql, args, err := filter.ExtendSelect(sq).ToSql()
 	//if err != nil {
-	//	test.Fatal(err)
+	//	t.Fatal(err)
 	//}
-	//_ = sqlx.Select(db, &S{}, sql, args)
+	//
+	//fmt.Println(sql)
+	//fmt.Println(args)
 }

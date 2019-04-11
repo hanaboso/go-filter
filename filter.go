@@ -1,4 +1,4 @@
-package filter // import "gitlab.hanaboso.net/prochazka.t/grid-filter"
+package filter // import "gitlab.hanaboso.net/prochazka.t/filter"
 
 import (
 	"encoding/json"

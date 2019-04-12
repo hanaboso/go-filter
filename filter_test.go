@@ -151,7 +151,7 @@ var filterParsed = Filter{
 		Page:         1,
 		ItemsPerPage: 20,
 	},
-	search: "value",
+	search: search{value: "value"},
 	sorter: sorter{
 		{Column: "firstName", Direction: "ASC"},
 		{Column: "created", Direction: "DESC"},
@@ -187,7 +187,9 @@ var filterFitted = Filter{
 		Page:         1,
 		ItemsPerPage: 20,
 	},
-	search: "value",
+	search: search{value: "value", filters: [][]filter{
+		{{Column: "x.name", Operator: "LIKE", Value: []interface{}{"value"}, valid: true}},
+	}},
 	sorter: sorter{
 		{Column: "firstName", Direction: "ASC"},
 		{Column: "created", Direction: "DESC"},
@@ -232,15 +234,6 @@ type UUID struct {
 
 func (u UUID) Value() (driver.Value, error) {
 	return u.MarshalBinary()
-}
-
-// This is example struct
-type S struct {
-	ID          UUID       `json:"id"`
-	CreatedAt   time.Time  `json:"createdAt" db:"created_at"`
-	Name        string     `json:"name"`
-	Value       int        `json:"value"`
-	ActivatedAt *time.Time `json:"activatedAt" db:"activated_at"`
 }
 
 func TestMain(m *testing.M) {
@@ -316,11 +309,11 @@ func TestFilter_FitToModel(t *testing.T) {
 	}
 
 	var model struct {
-		ID          UUID       `json:"id" db:"x.id"`
-		CreatedAt   time.Time  `json:"createdAt" db:"s.created_at"`
-		Name        string     `json:"name" db:"x.name"`
-		Value       int        `json:"value" db:"x.value"`
-		ActivatedAt *time.Time `json:"activatedAt" db:"s.activated_at"`
+		ID          UUID       `json:"id" db:"x.id" grid:"filter,sort"`
+		CreatedAt   time.Time  `json:"createdAt" db:"s.created_at" grid:"filter"`
+		Name        string     `json:"name" db:"x.name" grid:"filter,search"`
+		Value       int        `json:"value" db:"x.value" grid:"filter"`
+		ActivatedAt *time.Time `json:"activatedAt" db:"s.activated_at" grid:"filter"`
 	}
 
 	if err := filter.FitToModel(model); err != nil {

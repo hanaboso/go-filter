@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Masterminds/squirrel"
-	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -66,28 +66,32 @@ type Resp struct {
 	Sorter []struct {
 		Column    string `json:"column"`
 		Direction string `json:"direction"`
-	} `json:"sorter"`
-	LastID string `json:"lastId"`
+	} `json:"sorter,omitempty"`
+	Cursor *struct {
+		LastID       interface{} `json:"lastId"`
+		ItemsPerPage uint64      `json:"itemsPerPage"`
+	} `json:"cursoring,omitempty"`
 	Filter [][]struct {
 		Operator string        `json:"operator"`
 		Column   string        `json:"column"`
-		Value    []interface{} `json:"value"`
+		Values   []interface{} `json:"value"`
 	} `json:"filter"`
 }
 
-// TODO validate input
 // Filter
 type Filter struct {
 	filter filters
 	paging paging
 	search search
 	sorter sorter
-	lastID string
+
+	fitted bool
+	m      sync.Mutex
 }
 
-// TODO make immutable
-func (f *Filter) AddFilter(column, operator string, values ...interface{}) {
-	f.filter.AddFilter(column, operator, values)
+func (f Filter) AddFilter(column, operator string, values ...interface{}) Filter {
+	f.filter = f.filter.AddFilter(column, operator, values)
+	return f
 }
 
 func (f Filter) Resp(items interface{}, count uint64) (resp Resp) {
@@ -113,50 +117,51 @@ func (f Filter) Resp(items interface{}, count uint64) (resp Resp) {
 			Direction string `json:"direction"`
 		}{Column: s.Column, Direction: s.Direction})
 	}
-	resp.LastID = f.lastID
 	resp.Filter = make([][]struct {
 		Operator string        `json:"operator"`
 		Column   string        `json:"column"`
-		Value    []interface{} `json:"value"`
+		Values   []interface{} `json:"value"`
 	}, len(f.filter))
 	for i, filter := range f.filter {
 		resp.Filter[i] = make([]struct {
 			Operator string        `json:"operator"`
 			Column   string        `json:"column"`
-			Value    []interface{} `json:"value"`
+			Values   []interface{} `json:"value"`
 		}, len(filter))
 		for j, filter := range filter {
 			resp.Filter[i][j].Column = filter.Column
 			resp.Filter[i][j].Operator = filter.Operator
-			resp.Filter[i][j].Value = filter.Value
+			resp.Filter[i][j].Values = filter.Values
 		}
 	}
 
 	return resp
 }
+
+// MarshalJSON implements Marshaler interface
+// anonymous struct is used for marshaling unexported fields
 func (f Filter) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&struct {
 		Filter filters `json:"filter"`
 		Paging paging  `json:"paging"`
 		Search string  `json:"search"`
-		Sorter sorter  `json:"sorter"`
-		LastID string  `json:"lastId"`
+		Sorter sorter  `json:"sorter,omitempty"`
 	}{
 		Filter: f.filter,
 		Paging: f.paging,
 		Search: f.search.value,
 		Sorter: f.sorter,
-		LastID: f.lastID,
 	})
 }
 
+// UnmarshalJSON implements Unmarshaler interface
+// anonymous struct is used for binding unexported fields
 func (f *Filter) UnmarshalJSON(b []byte) error {
 	var body struct {
 		Filter filters `json:"filter"`
 		Paging paging  `json:"paging"`
 		Search string  `json:"search"`
 		Sorter sorter  `json:"sorter"`
-		LastID string  `json:"lastId"`
 	}
 	if err := json.Unmarshal(b, &body); err != nil {
 		return err
@@ -166,20 +171,25 @@ func (f *Filter) UnmarshalJSON(b []byte) error {
 		paging: body.Paging,
 		search: search{value: body.Search},
 		sorter: body.Sorter,
-		lastID: body.LastID,
 	}
 
 	return nil
 }
 
 // FitToModel tries to fit filter to model, if error occurred filter will be in inappropriate state
-// TODO mark filter as fitted, so it can be fitted only once
-func (f *Filter) FitToModel(model interface{}) (err error) {
-	var g errgroup.Group
-	g.Go(func() error { return f.filter.FitToModel(model) })
-	g.Go(func() error { return f.search.FitToModel(model) })
-	g.Go(func() error { return f.sorter.FitToModel(model) })
-	return g.Wait()
+func (f *Filter) FitToModel(model interface{}) {
+	f.m.Lock()
+	defer f.m.Unlock()
+	if f.fitted {
+		f.Reset()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); f.filter.FitToModel(model) }()
+	go func() { defer wg.Done(); f.search.FitToModel(model) }()
+	go func() { defer wg.Done(); f.sorter.FitToModel(model) }()
+	wg.Wait()
 }
 
 // ToSql returns sql, args and error build from contained filters
@@ -196,21 +206,30 @@ func (f Filter) ExtendSelect(builder squirrel.SelectBuilder) squirrel.SelectBuil
 		Offset(f.paging.Offset())
 }
 
+func (f *Filter) Reset() {
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); f.filter.Reset() }()
+	go func() { defer wg.Done(); f.search.Reset() }()
+	go func() { defer wg.Done(); f.sorter.Reset() }()
+	wg.Wait()
+	f.fitted = false
+}
+
 // filters is type for all levels of filters
 type filters [][]filter
 
-// TODO make immutable
-func (f *filters) AddFilter(column, operator string, values ...interface{}) {
-	*f = append(*f, []filter{{Column: column, Operator: operator, Value: values}})
+func (f filters) AddFilter(column, operator string, values ...interface{}) filters {
+	return append(f, []filter{{Column: column, Operator: operator, Values: values}})
 }
 
 // ToSql builds are nested filters to one Sql query
 func (f filters) ToSql() (string, []interface{}, error) {
 	var and squirrel.And
-	for _, f := range f {
+	for i := range f {
 		var or squirrel.Or
-		for _, f := range f {
-			or = append(or, f)
+		for j := range f[i] {
+			or = append(or, f[i][j])
 		}
 		and = append(and, or)
 	}
@@ -219,7 +238,7 @@ func (f filters) ToSql() (string, []interface{}, error) {
 
 // FitToModel transforms all filters from JSON formats to DB format
 // if some filter doesn't match with struct's field, than isn't marked as valid
-func (f filters) FitToModel(model interface{}) (err error) {
+func (f filters) FitToModel(model interface{}) {
 	t := reflect.TypeOf(model)
 
 	// change model type to non-pointer
@@ -252,119 +271,146 @@ func (f filters) FitToModel(model interface{}) (err error) {
 			jsonName = field.Name
 		}
 
-		// TODO goroutines?
+		var wg sync.WaitGroup
 		// change f type to same as in mapping struct
 		for andI := range f {
 			for orI := range f[andI] {
-				filter := &f[andI][orI]
-				// if filter match witch struct's json name
-				if filter.Column == jsonName {
-					// column name is db name now
-					filter.Column = dbName
-					// set as valid
-					filter.valid = true
-					// TODO try to use JSON/TEXT unmarshaler
-					if f, ok := registeredTypes[fieldType]; ok {
-						for i, v := range filter.Value {
-							if filter.Value[i], err = f(v); err != nil {
-								return err
+				wg.Add(1)
+				go func(filter *filter) {
+					defer wg.Done()
+					// if filter match witch struct's json name
+					if filter.Column == jsonName {
+						// column name is db name now
+						filter.column = dbName
+						// TODO try to use JSON/TEXT unmarshaler
+						filter.values = append(filter.Values[:0:0], filter.Values...)
+						if f, ok := registeredTypes[fieldType]; ok {
+							for i, v := range filter.Values {
+								if val, err := f(v); err != nil {
+									filter.column = ""
+									return
+								} else {
+									filter.values[i] = val
+								}
+							}
+						} else {
+							for i, v := range filter.Values {
+								filter.values[i] = v
 							}
 						}
 					}
-				}
+
+				}(&f[andI][orI])
+
 			}
 		}
+		wg.Wait()
 	}
+}
 
-	return nil
+func (f filters) Reset() {
+	for i := range f {
+		for j := range f[i] {
+			f[i][j].Reset()
+		}
+	}
 }
 
 // filter is one concrete filter on one column
 type filter struct {
-	Operator string        `json:"operator"`
-	Column   string        `json:"column"`
-	Value    []interface{} `json:"value"`
-	valid    bool
+	Operator string `json:"operator"`
+	// json column name
+	Column string `json:"column"`
+	// database column name
+	column string
+	// json values
+	Values []interface{} `json:"value"`
+	// database values
+	values []interface{}
 }
 
 // ToSql creates Sql from filter, but only if filter is marked as valid during filters.FitToModel
 func (f filter) ToSql() (string, []interface{}, error) {
-	if !f.valid {
+	if len(f.column) < 1 {
 		return "", nil, nil
 	}
 
-	// TODO check length of f.Value without repetitions
+	// TODO check length of f.Values without repetitions
 
 	var sq squirrel.Sqlizer
 	switch op := f.Operator; op {
 	case "EQ", "":
-		if len(f.Value) < 1 {
+		if len(f.values) < 1 {
 			return "", nil, fmt.Errorf("expected at least %d value for %s operator", 1, op)
 		}
-		sq = squirrel.Eq{f.Column: f.Value[0]}
+		sq = squirrel.Eq{f.column: f.values[0]}
 	case "NEQ":
-		if len(f.Value) < 1 {
+		if len(f.values) < 1 {
 			return "", nil, fmt.Errorf("expected at least %d value for %s operator", 1, op)
 		}
-		sq = squirrel.NotEq{f.Column: f.Value[0]}
+		sq = squirrel.NotEq{f.column: f.values[0]}
 	case "GT":
-		if len(f.Value) < 1 {
+		if len(f.values) < 1 {
 			return "", nil, fmt.Errorf("expected at least %d value for %s operator", 1, op)
 		}
-		sq = squirrel.Gt{f.Column: f.Value[0]}
+		sq = squirrel.Gt{f.column: f.values[0]}
 	case "LT":
-		if len(f.Value) < 1 {
+		if len(f.values) < 1 {
 			return "", nil, fmt.Errorf("expected at least %d value for %s operator", 1, op)
 		}
-		sq = squirrel.Lt{f.Column: f.Value[0]}
+		sq = squirrel.Lt{f.column: f.values[0]}
 	case "GTE":
-		if len(f.Value) < 1 {
+		if len(f.values) < 1 {
 			return "", nil, fmt.Errorf("expected at least %d value for %s operator", 1, op)
 		}
-		sq = squirrel.GtOrEq{f.Column: f.Value[0]}
+		sq = squirrel.GtOrEq{f.column: f.values[0]}
 	case "LTE":
-		if len(f.Value) < 1 {
+		if len(f.Values) < 1 {
 			return "", nil, fmt.Errorf("expected at least %d value for %s operator", 1, op)
 		}
-		sq = squirrel.LtOrEq{f.Column: f.Value[0]}
+		sq = squirrel.LtOrEq{f.column: f.values[0]}
 	case "LIKE":
-		if len(f.Value) < 1 {
+		if len(f.values) < 1 {
 			return "", nil, fmt.Errorf("expected at least %d value for %s operator", 1, op)
 		}
-		sq = squirrel.Like{f.Column: fmt.Sprintf("%%%s%%", f.Value[0])}
+		sq = squirrel.Like{f.column: fmt.Sprintf("%%%s%%", f.values[0])}
 	case "STARTS":
-		if len(f.Value) < 1 {
+		if len(f.values) < 1 {
 			return "", nil, fmt.Errorf("expected at least %d value for %s operator", 1, op)
 		}
-		sq = squirrel.Like{f.Column: fmt.Sprintf("%%%s", f.Value[0])}
+		sq = squirrel.Like{f.column: fmt.Sprintf("%%%s", f.values[0])}
 	case "ENDS":
-		if len(f.Value) < 1 {
+		if len(f.values) < 1 {
 			return "", nil, fmt.Errorf("expected at least %d value for %s operator", 1, op)
 		}
-		sq = squirrel.Like{f.Column: fmt.Sprintf("%s%%", f.Value[0])}
+		sq = squirrel.Like{f.column: fmt.Sprintf("%s%%", f.values[0])}
 	case "EMPTY":
-		sq = squirrel.Eq{f.Column: nil}
+		sq = squirrel.Eq{f.column: nil}
 	case "NEMPTY":
-		sq = squirrel.NotEq{f.Column: nil}
+		sq = squirrel.NotEq{f.column: nil}
 	case "BETWEEN":
-		if len(f.Value) < 2 {
+		if len(f.values) < 2 {
 			return "", nil, fmt.Errorf("expected at least %d values for %s operator", 2, op)
 		}
 		sq = squirrel.And{
-			squirrel.GtOrEq{f.Column: f.Value[0]},
-			squirrel.Lt{f.Column: f.Value[1]},
+			squirrel.GtOrEq{f.column: f.values[0]},
+			squirrel.Lt{f.column: f.values[1]},
 		}
 	case "NBETWEEN":
-		if len(f.Value) < 2 {
+		if len(f.values) < 2 {
 			return "", nil, fmt.Errorf("expected at least %d values for %s operator", 2, op)
 		}
 		sq = squirrel.Or{
-			squirrel.Lt{f.Column: f.Value[0]},
-			squirrel.GtOrEq{f.Column: f.Value[1]},
+			squirrel.Lt{f.column: f.values[0]},
+			squirrel.GtOrEq{f.column: f.values[1]},
 		}
 	}
 
 	return sq.ToSql()
+}
+
+func (f *filter) Reset() {
+	f.column = ""
 }
 
 type search struct {
@@ -372,9 +418,9 @@ type search struct {
 	filters filters
 }
 
-func (s *search) FitToModel(model interface{}) error {
+func (s *search) FitToModel(model interface{}) {
 	if len(s.value) < 1 {
-		return nil
+		return
 	}
 	s.filters = make(filters, 1)
 
@@ -394,7 +440,6 @@ func (s *search) FitToModel(model interface{}) error {
 			fieldType = fieldType.Elem()
 		}
 
-		// TODO check if searchable field
 		if !isFieldSearchable(field) {
 			continue
 		}
@@ -404,36 +449,49 @@ func (s *search) FitToModel(model interface{}) error {
 		if !ok {
 			dbName = strings.ToLower(field.Name)
 		}
-		s.filters[0] = append(s.filters[0], filter{Column: dbName, Operator: "LIKE", Value: []interface{}{s.value}, valid: true})
+		s.filters[0] = append(s.filters[0], filter{column: dbName, Operator: "LIKE", values: []interface{}{s.value}})
 	}
-
-	return nil
 }
 
 func (s search) ToSql() (string, []interface{}, error) {
 	return s.filters.ToSql()
 }
 
+func (s *search) Reset() {
+	s.filters.Reset()
+}
+
 // sorter holds sorting rules
 type sorter []struct {
-	Column    string `json:"column"`
+	// json column name
+	Column string `json:"column"`
+	// database column name
+	column    string
 	Direction string `json:"direction"`
-	valid     bool
 }
 
 // OrderBy returns ORDER BY string for Sql
 func (s sorter) OrderBy() []string {
 	sl := make([]string, 0, len(s))
 	for _, so := range s {
-		if so.valid {
-			sl = append(sl, fmt.Sprintf("%s %s", so.Column, so.Direction))
+		if len(so.column) > 0 {
+			sl = append(sl, fmt.Sprintf("%s %s", so.column, so.Direction))
 		}
 	}
 	return sl
 }
 
-// TODO DefaultSorter
-func (s sorter) FitToModel(model interface{}) error {
+func (s sorter) Reset() {
+	for i := range s {
+		s[i].column = ""
+	}
+}
+
+func (s *sorter) FitToModel(model interface{}) {
+	if *s == nil {
+		*s = DefaultSorter
+	}
+
 	t := reflect.TypeOf(model)
 
 	// change model type to non-pointer
@@ -465,19 +523,15 @@ func (s sorter) FitToModel(model interface{}) error {
 			jsonName = field.Name
 		}
 
-		// TODO goroutines?
 		// change f type to same as in mapping struct
-		for i := range s {
-			if s[i].Column == jsonName {
+		for i := range *s {
+			if (*s)[i].Column == jsonName {
 				// column name is db name now
-				s[i].Column = dbName
-				// set as valid
-				s[i].valid = true
+				(*s)[i].column = dbName
 			}
 		}
-	}
 
-	return nil
+	}
 }
 
 // paging holds info for pagination

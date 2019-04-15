@@ -3,8 +3,6 @@ package filter
 import (
 	"bytes"
 	"database/sql/driver"
-	"errors"
-	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -246,23 +244,6 @@ type UUID struct {
 
 func (u UUID) Value() (driver.Value, error) {
 	return u.MarshalBinary()
-}
-
-func TestMain(m *testing.M) {
-	// Register custom type for transforming API format to DB format
-	RegisterType(UUID{}, func(i interface{}) (i2 interface{}, e error) {
-		s, ok := i.(string)
-		if !ok {
-			return nil, errors.New("expected string for UUID field")
-		}
-
-		uuid, err := uuid.Parse(s)
-		if err != nil {
-			return nil, fmt.Errorf("wrong format[%s] for UUID", s)
-		}
-		return UUID{UUID: uuid}, err
-	})
-	m.Run()
 }
 
 func Test_ParseGet(t *testing.T) {

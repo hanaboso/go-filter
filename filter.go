@@ -1,14 +1,13 @@
 package filter
 
 import (
+	"encoding"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Masterminds/squirrel"
 )
@@ -17,40 +16,6 @@ var (
 	DefaultLimit  uint64 = 10
 	DefaultSorter        = sorter{{Column: "created", Direction: "DESC"}, {Column: "id", Direction: "DESC"}}
 )
-
-// ConvertFunc is just typed function that's used for registered types for transforming data
-type ConvertFunc func(i interface{}) (interface{}, error)
-
-var registeredTypes = make(map[reflect.Type]ConvertFunc)
-
-func init() {
-	// register time.Time on init, RFC3339 layout is expected
-	// this can't be replaced by re-registering time.Time type
-	RegisterType(time.Time{}, func(layout string) ConvertFunc {
-		return func(i interface{}) (i2 interface{}, e error) {
-			s, ok := i.(string)
-			if !ok {
-				return nil, errors.New("expected string for time.Time field")
-			}
-
-			t, err := time.Parse(layout, s)
-			if err != nil {
-				return nil, fmt.Errorf("wrong time layout: %s, expected: %s", s, layout)
-			}
-			return t, nil
-		}
-	}(time.RFC3339))
-}
-
-// RegisterType is used for registering types in filter
-// This registered types are transformed from API format to Db format by passed func
-func RegisterType(i interface{}, f ConvertFunc) {
-	t := reflect.TypeOf(i)
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	registeredTypes[t] = f
-}
 
 type Resp struct {
 	Items  interface{} `json:"items"`
@@ -249,11 +214,13 @@ func (f filters) FitToModel(model interface{}) {
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 
-		// change type to non-pointer
+		// fieldType is non-pointer type ex. time.Time
 		fieldType := field.Type
 		if fieldType.Kind() == reflect.Ptr {
 			fieldType = fieldType.Elem()
 		}
+		// fieldTypePtr is pointer type ex. *time.Time
+		fieldTypePtr := reflect.New(fieldType)
 
 		// filter only by allowed fields
 		if !isFieldFilterable(field) {
@@ -278,27 +245,35 @@ func (f filters) FitToModel(model interface{}) {
 				wg.Add(1)
 				go func(filter *filter) {
 					defer wg.Done()
-					// if filter match witch struct's json name
-					if filter.Column == jsonName {
-						// column name is db name now
-						filter.column = dbName
-						// TODO try to use JSON/TEXT unmarshaler
-						filter.values = append(filter.Values[:0:0], filter.Values...)
-						if f, ok := registeredTypes[fieldType]; ok {
-							for i, v := range filter.Values {
-								if val, err := f(v); err != nil {
-									filter.column = ""
-									return
-								} else {
-									filter.values[i] = val
-								}
+					// check if filter matches witch struct's json name
+					if filter.Column != jsonName {
+						return // skip this filter for this field
+					}
+					// create 1:1 copy of array
+					filter.values = append(filter.Values[:0:0], filter.Values...)
+					switch unmarshal := fieldTypePtr.Interface().(type) {
+					case encoding.TextUnmarshaler:
+						for i, v := range filter.Values {
+							if err := unmarshal.UnmarshalText([]byte(v.(string))); err != nil {
+								return // return to not save dbName to column, so filter wouldn't be used
 							}
-						} else {
-							for i, v := range filter.Values {
-								filter.values[i] = v
+							filter.values[i] = reflect.Indirect(reflect.ValueOf(unmarshal)).Interface()
+						}
+					case json.Unmarshaler:
+						for i, v := range filter.Values {
+							s := `"` + v.(string) + `"`
+							if err := unmarshal.UnmarshalJSON([]byte(s)); err != nil {
+								return // return to not save dbName to column, so filter wouldn't be used
 							}
+							filter.values[i] = reflect.Indirect(reflect.ValueOf(unmarshal)).Interface()
+						}
+					default:
+						for i, v := range filter.Values {
+							filter.values[i] = v
 						}
 					}
+					// column name is db name now
+					filter.column = dbName
 
 				}(&f[andI][orI])
 

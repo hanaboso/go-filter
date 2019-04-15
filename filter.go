@@ -51,7 +51,7 @@ type Filter struct {
 	sorter sorter
 
 	fitted bool
-	m      sync.Mutex
+	m      *sync.Mutex
 }
 
 func (f Filter) AddFilter(column, operator string, values ...interface{}) Filter {

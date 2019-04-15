@@ -51,7 +51,7 @@ type Filter struct {
 	sorter sorter
 
 	fitted bool
-	m      *sync.Mutex
+	//m      *sync.Mutex
 }
 
 func (f Filter) AddFilter(column, operator string, values ...interface{}) Filter {
@@ -143,8 +143,8 @@ func (f *Filter) UnmarshalJSON(b []byte) error {
 
 // FitToModel tries to fit filter to model, if error occurred filter will be in inappropriate state
 func (f *Filter) FitToModel(model interface{}) {
-	f.m.Lock()
-	defer f.m.Unlock()
+	//f.m.Lock()
+	//defer f.m.Unlock()
 	if f.fitted {
 		f.Reset()
 	}

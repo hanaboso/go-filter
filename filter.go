@@ -104,10 +104,10 @@ func (f Filter) Resp(items interface{}, count uint64) (resp Resp) {
 	if resp.Paging.LastPage = resp.Paging.Total / resp.Paging.ItemsPerPage; resp.Paging.Total%resp.Paging.ItemsPerPage > 0 {
 		resp.Paging.LastPage += 1
 	}
-	if resp.Paging.NextPage = f.paging.Page + 1; resp.Paging.NextPage > resp.Paging.LastPage {
+	if resp.Paging.NextPage = resp.Paging.Page + 1; resp.Paging.NextPage > resp.Paging.LastPage {
 		resp.Paging.NextPage = resp.Paging.LastPage
 	}
-	if resp.Paging.PreviousPage = f.paging.Page; resp.Paging.PreviousPage < 1 {
+	if resp.Paging.PreviousPage = resp.Paging.Page - 1; resp.Paging.PreviousPage < 1 {
 		resp.Paging.PreviousPage = 1
 	}
 	resp.Search = f.search.value

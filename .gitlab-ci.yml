@@ -1,9 +1,28 @@
 stages:
   - test
+  - mirror
+  - cleanup
+
+before_script:
+  - eval $(ssh-agent)
+  - ssh-add ~/.ssh/bob_the_builder_hanaboso
 
 test:
   stage: test
-  image: golang:latest
   script:
-    - go vet ./...
-    - go test -v ./...
+    - export COMPOSE_FILE=docker-compose.ci.yml
+    - make ${COMPOSE_FILE} test
+
+mirror:
+  stage: mirror
+  script:
+    - "curl -X POST -F token=${MIRROR_TOKEN} -F ref=master -F variables\\[REPO\\]=hanaboso-go-filter https://gitlab.hanaboso.net/api/v4/projects/38/trigger/pipeline"
+  only:
+    - master
+
+cleanup:
+  stage: cleanup
+  when: always
+  script:
+    - export COMPOSE_FILE=docker-compose.ci.yml
+    - make ${COMPOSE_FILE} docker-down-clean || echo "CleanUP failed"

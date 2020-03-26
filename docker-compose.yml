@@ -1,0 +1,13 @@
+version: '3.5'
+
+services:
+    app:
+        image: dkr.hanaboso.net/hanaboso/go-base:dev
+        user: ${DEV_UID}:${DEV_GID}
+        volumes:
+            - ./:/app
+            - ${GOPATH}/pkg:/go/pkg
+            - ${DOCKER_SOCKET_PATH}:/var/run/docker.sock
+        environment:
+            DEV_UID: ${DEV_UID}
+            DEV_GID: ${DEV_GID}

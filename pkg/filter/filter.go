@@ -13,10 +13,13 @@ import (
 )
 
 var (
-	DefaultLimit  uint64 = 10
-	DefaultSorter        = sorter{{Column: "created", Direction: "DESC"}, {Column: "id", Direction: "DESC"}}
+	// DefaultLimit default limit
+	DefaultLimit uint64 = 10
+	// DefaultSorter default sorter
+	DefaultSorter = sorter{{Column: "created", Direction: "DESC"}, {Column: "id", Direction: "DESC"}}
 )
 
+// Resp response
 type Resp struct {
 	Items  interface{} `json:"items"`
 	Paging struct {
@@ -43,7 +46,17 @@ type Resp struct {
 	} `json:"filter"`
 }
 
-// Filter
+type prefix []string
+
+func (p prefix) Append(s string) prefix {
+	return append(p, s)
+}
+
+func (p prefix) String() string {
+	return strings.Join(p, ".")
+}
+
+// Filter filter
 type Filter struct {
 	filter filters
 	paging paging
@@ -54,11 +67,13 @@ type Filter struct {
 	//m      *sync.Mutex
 }
 
+// AddFilter adds filter
 func (f Filter) AddFilter(column, operator string, values ...interface{}) Filter {
-	f.filter = f.filter.AddFilter(column, operator, values)
+	f.filter = f.filter.AddFilter(column, operator, values...)
 	return f
 }
 
+// Resp format response
 func (f Filter) Resp(items interface{}, count uint64) (resp Resp) {
 	resp.Items = items
 	if resp.Paging.Page = f.paging.Page; resp.Paging.Page < 1 {
@@ -67,7 +82,7 @@ func (f Filter) Resp(items interface{}, count uint64) (resp Resp) {
 	resp.Paging.Total = count
 	resp.Paging.ItemsPerPage = f.paging.Limit()
 	if resp.Paging.LastPage = resp.Paging.Total / resp.Paging.ItemsPerPage; resp.Paging.Total%resp.Paging.ItemsPerPage > 0 {
-		resp.Paging.LastPage += 1
+		resp.Paging.LastPage++
 	}
 	if resp.Paging.NextPage = resp.Paging.Page + 1; resp.Paging.NextPage > resp.Paging.LastPage {
 		resp.Paging.NextPage = resp.Paging.LastPage
@@ -162,6 +177,7 @@ func (f Filter) ToSql(table string, columns ...string) (string, []interface{}, e
 	return f.ExtendSelect(squirrel.Select(columns...).From(table)).ToSql()
 }
 
+// ExtendSelect extends select
 func (f Filter) ExtendSelect(builder squirrel.SelectBuilder) squirrel.SelectBuilder {
 	return builder.
 		Where(f.filter).
@@ -171,6 +187,7 @@ func (f Filter) ExtendSelect(builder squirrel.SelectBuilder) squirrel.SelectBuil
 		Offset(f.paging.Offset())
 }
 
+// Reset reset
 func (f *Filter) Reset() {
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -190,14 +207,17 @@ func (f filters) AddFilter(column, operator string, values ...interface{}) filte
 
 // ToSql builds are nested filters to one Sql query
 func (f filters) ToSql() (string, []interface{}, error) {
-	var and squirrel.And
+	and := make(squirrel.And, len(f))
+
 	for i := range f {
-		var or squirrel.Or
+		or := make(squirrel.Or, len(f[i]))
+
 		for j := range f[i] {
-			or = append(or, f[i][j])
+			or[j] = f[i][j]
 		}
-		and = append(and, or)
+		and[i] = or
 	}
+
 	return and.ToSql()
 }
 
@@ -213,74 +233,128 @@ func (f filters) FitToModel(model interface{}) {
 	// go over all fields
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
-
-		// fieldType is non-pointer type ex. time.Time
+		// change type to non-pointer
 		fieldType := field.Type
 		if fieldType.Kind() == reflect.Ptr {
 			fieldType = fieldType.Elem()
 		}
-		// fieldTypePtr is pointer type ex. *time.Time
-		fieldTypePtr := reflect.New(fieldType)
+
+		if fieldType.Kind() == reflect.Struct && isFieldDiveable(field) {
+			for i := 0; i < fieldType.NumField(); i++ {
+				nField := fieldType.Field(i)
+
+				if !isFieldFilterable(nField) {
+					continue
+				}
+
+				// get db name for this column
+				dbName, ok := field.Tag.Lookup("db")
+				if !ok {
+					dbName = strings.ToLower(field.Name)
+				}
+				// get json name for this column
+				jsonName, ok := field.Tag.Lookup("json")
+				if ok {
+					jsonName = strings.Split(jsonName+",", ",")[0] // remove ,omitempty
+				} else {
+					jsonName = field.Name
+				}
+
+				if field.Anonymous {
+					f.fitToField(fieldType.Field(i), nil, nil)
+				} else {
+					f.fitToField(fieldType.Field(i), prefix{dbName}, prefix{jsonName})
+				}
+			}
+			continue
+		}
 
 		// filter only by allowed fields
 		if !isFieldFilterable(field) {
 			continue
 		}
 
-		// get db name for this column
-		dbName, ok := field.Tag.Lookup("db")
-		if !ok {
-			dbName = strings.ToLower(field.Name)
-		}
-		// get json name for this column
-		jsonName, ok := field.Tag.Lookup("json")
-		if !ok {
-			jsonName = field.Name
-		}
-
-		var wg sync.WaitGroup
-		// change f type to same as in mapping struct
-		for andI := range f {
-			for orI := range f[andI] {
-				wg.Add(1)
-				go func(filter *filter) {
-					defer wg.Done()
-					// check if filter matches witch struct's json name
-					if filter.Column != jsonName {
-						return // skip this filter for this field
-					}
-					// create 1:1 copy of array
-					filter.values = append(filter.Values[:0:0], filter.Values...)
-					switch unmarshal := fieldTypePtr.Interface().(type) {
-					case encoding.TextUnmarshaler:
-						for i, v := range filter.Values {
-							if err := unmarshal.UnmarshalText([]byte(v.(string))); err != nil {
-								return // return to not save dbName to column, so filter wouldn't be used
-							}
-							filter.values[i] = reflect.Indirect(reflect.ValueOf(unmarshal)).Interface()
-						}
-					case json.Unmarshaler:
-						for i, v := range filter.Values {
-							s := `"` + v.(string) + `"`
-							if err := unmarshal.UnmarshalJSON([]byte(s)); err != nil {
-								return // return to not save dbName to column, so filter wouldn't be used
-							}
-							filter.values[i] = reflect.Indirect(reflect.ValueOf(unmarshal)).Interface()
-						}
-					default:
-						for i, v := range filter.Values {
-							filter.values[i] = v
-						}
-					}
-					// column name is db name now
-					filter.column = dbName
-
-				}(&f[andI][orI])
-
-			}
-		}
-		wg.Wait()
+		f.fitToField(field, nil, nil)
 	}
+}
+
+func (f filters) fitToField(field reflect.StructField, dbPrefix, jsonPrefix prefix) {
+	// fieldType is non-pointer type ex. time.Time
+	fieldType := field.Type
+	if fieldType.Kind() == reflect.Ptr {
+		fieldType = fieldType.Elem()
+	}
+	// fieldTypePtr is pointer type ex. *time.Time
+	fieldTypePtr := reflect.New(fieldType)
+
+	// get db name for this column
+	dbName, ok := field.Tag.Lookup("db")
+	if !ok {
+		dbName = strings.ToLower(field.Name)
+	}
+	dbName = dbPrefix.Append(dbName).String()
+	// get json name for this column
+	jsonName, ok := field.Tag.Lookup("json")
+	if ok {
+		jsonName = strings.Split(jsonName+",", ",")[0] // remove ,omitempty
+	} else {
+		jsonName = field.Name
+	}
+	jsonName = jsonPrefix.Append(jsonName).String()
+
+	var wg sync.WaitGroup
+	// change f type to same as in mapping struct
+	for andI := range f {
+		for orI := range f[andI] {
+			wg.Add(1)
+			/*go */ func(filter *filter) {
+				defer wg.Done()
+				// check if filter matches witch struct's json name
+				if filter.Column != jsonName {
+					return // skip this filter for this field
+				}
+				// create 1:1 copy of array
+				filter.values = append(filter.Values[:0:0], filter.Values...)
+				filter.column = dbName
+
+				switch unmarshal := fieldTypePtr.Interface().(type) {
+				case encoding.TextUnmarshaler:
+					for i, v := range filter.Values {
+						s, ok := v.(string)
+						if !ok {
+							filter.values[i] = v
+							continue
+						}
+						filter.values[i] = s
+
+						if err := unmarshal.UnmarshalText([]byte(s)); err != nil {
+							return
+						}
+						filter.values[i] = reflect.Indirect(reflect.ValueOf(unmarshal)).Interface()
+					}
+				case json.Unmarshaler:
+					for i, v := range filter.Values {
+						s, ok := v.(string)
+						if !ok {
+							filter.values[i] = v
+							continue
+						}
+						if err := unmarshal.UnmarshalJSON([]byte(`"` + s + `"`)); err != nil {
+							return // return to not save dbName to column, so filter wouldn't be used
+						}
+						filter.values[i] = reflect.Indirect(reflect.ValueOf(unmarshal)).Interface()
+					}
+				default:
+					for i, v := range filter.Values {
+						filter.values[i] = v
+					}
+				}
+
+			}(&f[andI][orI])
+
+		}
+	}
+	wg.Wait()
 }
 
 func (f filters) Reset() {
@@ -310,10 +384,8 @@ func (f filter) ToSql() (string, []interface{}, error) {
 		return "", nil, nil
 	}
 
-	// TODO check length of f.Values without repetitions
-
 	var sq squirrel.Sqlizer
-	switch op := f.Operator; op {
+	switch op := strings.ToUpper(f.Operator); op {
 	case "EQ", "":
 		if len(f.values) < 1 {
 			return "", nil, fmt.Errorf("expected at least %d value for %s operator", 1, op)
@@ -379,6 +451,12 @@ func (f filter) ToSql() (string, []interface{}, error) {
 			squirrel.Lt{f.column: f.values[0]},
 			squirrel.GtOrEq{f.column: f.values[1]},
 		}
+	case "IN":
+		sq = squirrel.Eq{f.column: f.values}
+	case "NIN":
+		sq = squirrel.NotEq{f.column: f.values}
+	default:
+		return "", nil, fmt.Errorf("invalid operator: %s", op)
 	}
 
 	return sq.ToSql()
@@ -415,17 +493,59 @@ func (s *search) FitToModel(model interface{}) {
 			fieldType = fieldType.Elem()
 		}
 
+		if fieldType.Kind() == reflect.Struct && isFieldDiveable(field) {
+			for i := 0; i < fieldType.NumField(); i++ {
+				nField := fieldType.Field(i)
+
+				if !isFieldSearchable(nField) {
+					continue
+				}
+
+				// get db name for this column
+				dbName, ok := field.Tag.Lookup("db")
+				if !ok {
+					dbName = strings.ToLower(field.Name)
+				}
+				// get json name for this column
+				jsonName, ok := field.Tag.Lookup("json")
+				if ok {
+					jsonName = strings.Split(jsonName+",", ",")[0] // remove ,omitempty
+				} else {
+					jsonName = field.Name
+				}
+
+				if field.Anonymous {
+					s.fitToField(fieldType.Field(i), nil, nil)
+				} else {
+					s.fitToField(fieldType.Field(i), prefix{dbName}, prefix{jsonName})
+				}
+			}
+			continue
+		}
+
 		if !isFieldSearchable(field) {
 			continue
 		}
 
-		// get db name for this column
-		dbName, ok := field.Tag.Lookup("db")
-		if !ok {
-			dbName = strings.ToLower(field.Name)
-		}
-		s.filters[0] = append(s.filters[0], filter{column: dbName, Operator: "LIKE", values: []interface{}{s.value}})
+		s.fitToField(field, nil, nil)
 	}
+}
+
+func (s *search) fitToField(field reflect.StructField, dbPrefix, jsonPrefix prefix) {
+	// change type to non-pointer
+	fieldType := field.Type
+	if fieldType.Kind() == reflect.Ptr {
+		fieldType = fieldType.Elem()
+	}
+
+	// get db name for this column
+	dbName, ok := field.Tag.Lookup("db")
+	if !ok {
+		dbName = strings.ToLower(field.Name)
+	}
+	dbName = dbPrefix.Append(dbName).String()
+
+	s.filters[0] = append(s.filters[0], filter{column: dbName, Operator: "LIKE", values: []interface{}{s.value}})
 }
 
 func (s search) ToSql() (string, []interface{}, error) {
@@ -464,7 +584,8 @@ func (s sorter) Reset() {
 
 func (s *sorter) FitToModel(model interface{}) {
 	if *s == nil {
-		*s = DefaultSorter
+		*s = make(sorter, len(DefaultSorter))
+		copy(*s, DefaultSorter)
 	}
 
 	t := reflect.TypeOf(model)
@@ -476,36 +597,76 @@ func (s *sorter) FitToModel(model interface{}) {
 	// go over all fields
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
-
 		// change type to non-pointer
 		fieldType := field.Type
 		if fieldType.Kind() == reflect.Ptr {
 			fieldType = fieldType.Elem()
 		}
 
+		if fieldType.Kind() == reflect.Struct && isFieldDiveable(field) {
+			for i := 0; i < fieldType.NumField(); i++ {
+				nField := fieldType.Field(i)
+
+				if !isFieldSortable(nField) {
+					continue
+				}
+
+				// get db name for this column
+				dbName, ok := field.Tag.Lookup("db")
+				if !ok {
+					dbName = strings.ToLower(field.Name)
+				}
+				// get json name for this column
+				jsonName, ok := field.Tag.Lookup("json")
+				if ok {
+					jsonName = strings.Split(jsonName+",", ",")[0] // remove ,omitempty
+				} else {
+					jsonName = field.Name
+				}
+				if field.Anonymous {
+					jsonName = ""
+				}
+
+				if field.Anonymous {
+					s.fitToField(fieldType.Field(i), nil, nil)
+				} else {
+					s.fitToField(fieldType.Field(i), prefix{dbName}, prefix{jsonName})
+				}
+			}
+			continue
+		}
+
 		if !isFieldSortable(field) {
 			continue
 		}
 
-		// get db name for this column
-		dbName, ok := field.Tag.Lookup("db")
-		if !ok {
-			dbName = strings.ToLower(field.Name)
-		}
-		// get json name for this column
-		jsonName, ok := field.Tag.Lookup("json")
-		if !ok {
-			jsonName = field.Name
-		}
+		s.fitToField(field, nil, nil)
+	}
+}
 
-		// change f type to same as in mapping struct
-		for i := range *s {
-			if (*s)[i].Column == jsonName {
-				// column name is db name now
-				(*s)[i].column = dbName
-			}
-		}
+func (s *sorter) fitToField(field reflect.StructField, dbPrefix, jsonPrefix prefix) {
 
+	// get db name for this column
+	dbName, ok := field.Tag.Lookup("db")
+	if !ok {
+		dbName = strings.ToLower(field.Name)
+	}
+	dbName = dbPrefix.Append(dbName).String()
+	// get json name for this column
+	jsonName, ok := field.Tag.Lookup("json")
+	if ok {
+		jsonName = strings.Split(jsonName+",", ",")[0] // remove ,omitempty
+	} else {
+		jsonName = field.Name
+	}
+	jsonName = jsonPrefix.Append(jsonName).String()
+
+	// change f type to same as in mapping struct
+	for i := range *s {
+		if (*s)[i].Column == jsonName {
+			// column name is db name now
+			(*s)[i].column = dbName
+		}
 	}
 }
 
@@ -535,14 +696,13 @@ func (p paging) Offset() uint64 {
 
 // Parse parses request by method and returns filter
 func Parse(req *http.Request) (Filter, error) {
-	if ct := req.Header.Get("Content-Type"); ct != "application/json" {
-		return Filter{}, fmt.Errorf("wrong content-type: %s", ct)
-	}
-
 	switch {
 	case req.Method == http.MethodGet:
 		return parseGet(req)
 	case req.Method == http.MethodPost:
+		if ct := req.Header.Get("Content-Type"); ct != "application/json" {
+			return Filter{}, fmt.Errorf("wrong content-type: %s", ct)
+		}
 		return parsePost(req)
 	default:
 		return Filter{}, fmt.Errorf("unknown method %s", req.Method)
@@ -589,4 +749,8 @@ func isFieldSearchable(field reflect.StructField) bool {
 
 func isFieldSortable(field reflect.StructField) bool {
 	return isField("sort", field)
+}
+
+func isFieldDiveable(field reflect.StructField) bool {
+	return isField("dive", field)
 }
